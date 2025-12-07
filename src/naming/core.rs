@@ -38,9 +38,9 @@ use crate::common::hash_utils::get_hash_value;
 use crate::common::NamingSysConfig;
 use crate::common::{delay_notify, AppSysConfig};
 use crate::grpc::bistream_manage::BiStreamManage;
-use crate::now_millis;
 use crate::now_millis_i64;
 use crate::utils::gz_encode;
+use crate::{now_millis, now_second_i32};
 use bean_factory::{bean, Inject, InjectComponent};
 use chrono::Local;
 use inner_mem_cache::TimeoutSet;
@@ -60,6 +60,7 @@ use crate::common::model::privilege::NamespacePrivilegeGroup;
 use crate::metrics::metrics_key::MetricsKey;
 use crate::metrics::model::{MetricsItem, MetricsQuery, MetricsRecord};
 use crate::namespace::NamespaceActor;
+use crate::naming::sniffing::{NetSniffing, NetSniffingCmd};
 use actix::prelude::*;
 use regex::Regex;
 
@@ -84,6 +85,8 @@ pub struct NamingActor {
     pub(crate) node_id: u64,
     /// 用于注入测试异常场景
     pub(crate) disable_notify: bool,
+    pub(crate) net_sniffing_addr: Option<Addr<NetSniffing>>,
+    pub(crate) last_perpetual_instance_probe_time: i32,
     //dal_addr: Addr<ServiceDalActor>,
 }
 
@@ -91,7 +94,6 @@ impl Actor for NamingActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        self.instance_time_out_heartbeat(ctx);
         log::info!(" NamingActor started");
     }
 }
@@ -122,8 +124,12 @@ impl Inject for NamingActor {
                 sys_config.naming_instance_timeout as i64 + 3000;
             self.node_id = sys_config.raft_node_id;
             log::info!("NamingActor change naming timeout info from env,health_timeout:{},instance_timeout:{}"
-                ,self.sys_config.instance_health_timeout_millis,self.sys_config.instance_timeout_millis)
+                ,self.sys_config.instance_health_timeout_millis,self.sys_config.instance_timeout_millis);
+            self.sys_config.perpetual_instance_probe_interval =
+                sys_config.naming_perpetual_instance_probe_interval;
         }
+        self.net_sniffing_addr = factory_data.get_actor();
+        self.instance_time_out_heartbeat(ctx);
         log::info!("NamingActor inject complete");
     }
 }
@@ -155,7 +161,8 @@ impl NamingActor {
             namespace_actor: None,
             node_id: 0,
             disable_notify: false,
-            //dal_addr,
+            net_sniffing_addr: None,
+            last_perpetual_instance_probe_time: 0,
         }
     }
 
@@ -182,7 +189,6 @@ impl NamingActor {
     }
 
     pub(crate) fn create_empty_service(&mut self, key: &ServiceKey) {
-        let ng_service_name = key.service_name.to_owned();
         match self.get_service(key) {
             Some(_) => {}
             None => {
@@ -609,6 +615,60 @@ impl NamingActor {
         }
     }
 
+    fn trigger_perpetual_health_check(&mut self) {
+        //TODO 可考虑增加是否主动检测永久实例状态的配置
+        let now = now_second_i32();
+        if now - self.last_perpetual_instance_probe_time
+            < self.sys_config.perpetual_instance_probe_interval
+        {
+            return;
+        }
+        let sniffing_addr = if let Some(v) = &self.net_sniffing_addr {
+            v.clone()
+        } else {
+            return;
+        };
+        self.last_perpetual_instance_probe_time = now;
+        let mut host_servers: HashMap<InstanceShortKey, Vec<ServiceKey>> = HashMap::new();
+        for service in self.service_map.values() {
+            for key in &service.perpetual_host_set {
+                let service_key = service.get_service_key();
+                if let Some(list) = host_servers.get_mut(key) {
+                    list.push(service_key);
+                } else {
+                    host_servers.insert(key.clone(), vec![service_key]);
+                }
+            }
+        }
+        for (key, value) in host_servers {
+            sniffing_addr.do_send(NetSniffingCmd::ProbeServiceHost(key, value));
+        }
+    }
+
+    fn update_perpetual_health(
+        &mut self,
+        host: InstanceShortKey,
+        service_keys: Vec<ServiceKey>,
+        sniffing_result: bool,
+    ) {
+        #[cfg(feature = "debug")]
+        log::info!(
+            "update_perpetual_health,host:{:?},keys:{:?},result:{}",
+            &host,
+            &service_keys,
+            sniffing_result
+        );
+        for service_key in service_keys {
+            if let Some(server) = self.service_map.get_mut(&service_key) {
+                if sniffing_result {
+                    server.update_perpetual_instance_healthy_valid(&host);
+                } else {
+                    server.update_instance_healthy_invalid(&host);
+                }
+            }
+        }
+    }
+
     fn time_check_notify(
         &mut self,
         key: ServiceKey,
@@ -845,6 +905,7 @@ impl NamingActor {
         ctx.run_later(Duration::from_millis(2000), |act, ctx| {
             act.clear_empty_service();
             act.clear_timeout_instance_metadata();
+            act.trigger_perpetual_health_check();
             let addr = ctx.address();
             addr.do_send(NamingCmd::PeekListenerTimeout);
             act.instance_time_out_heartbeat(ctx);
@@ -1082,8 +1143,16 @@ pub enum NamingCmd {
     ClusterRefreshProcessRange(ProcessRange),
     ReceiveSnapshot(SnapshotForReceive),
     QueryGrpcDistroData,
-    DiffGrpcDistroData { cluster_id: u64, data: DistroData },
+    DiffGrpcDistroData {
+        cluster_id: u64,
+        data: DistroData,
+    },
     QueryDistroInstanceSnapshot(Vec<InstanceKey>),
+    PerpetualHostSniffing {
+        host: InstanceShortKey,
+        service_keys: Vec<ServiceKey>,
+        success: bool,
+    },
 }
 
 pub enum NamingResult {
@@ -1338,6 +1407,14 @@ impl Handler<NamingCmd> for NamingActor {
             NamingCmd::QueryDistroInstanceSnapshot(instance_keys) => {
                 let instances = self.build_distro_instances(instance_keys);
                 Ok(NamingResult::DistroInstancesSnapshot(instances))
+            }
+            NamingCmd::PerpetualHostSniffing {
+                host,
+                service_keys,
+                success,
+            } => {
+                self.update_perpetual_health(host, service_keys, success);
+                Ok(NamingResult::NULL)
             }
         }
     }

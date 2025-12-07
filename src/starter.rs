@@ -8,6 +8,7 @@ use crate::mcp::core::McpManager;
 use crate::mcp::sse_manage::SseStreamManager;
 use crate::metrics::core::MetricsManager;
 use crate::namespace::NamespaceActor;
+use crate::naming::sniffing::NetSniffing;
 use crate::oauth2::core::OAuth2Manager;
 use crate::raft::cluster::route::RaftRequestRoute;
 use crate::raft::filestore::core::FileStore;
@@ -155,6 +156,9 @@ pub async fn config_factory(sys_config: Arc<AppSysConfig>) -> anyhow::Result<Fac
     factory.register(BeanDefinition::actor_with_inject_from_obj(
         naming_cluster_delay_notify_addr.clone(),
     ));
+    let net_sniffing =
+        NetSniffing::new(Duration::from_millis(1000), Duration::from_millis(3000)).start();
+    factory.register(BeanDefinition::actor_with_inject_from_obj(net_sniffing));
 
     let bistream_manage_addr = BiStreamManage::new().start();
     factory.register(BeanDefinition::actor_with_inject_from_obj(

@@ -17,6 +17,7 @@ pub mod service_index;
 
 #[cfg(feature = "debug")]
 pub mod naming_debug;
+pub mod sniffing;
 
 pub struct NamingUtils;
 

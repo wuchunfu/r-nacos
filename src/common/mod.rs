@@ -49,6 +49,8 @@ pub struct NamingSysConfig {
     pub instance_metadata_time_out_millis: u64,
     pub instance_health_timeout_millis: i64,
     pub instance_timeout_millis: i64,
+    /// 嗅探检测间隔
+    pub perpetual_instance_probe_interval: i32,
 }
 
 impl NamingSysConfig {
@@ -59,6 +61,7 @@ impl NamingSysConfig {
             instance_metadata_time_out_millis: 60000,
             instance_health_timeout_millis: 18000,
             instance_timeout_millis: 33000,
+            perpetual_instance_probe_interval: 60,
         }
     }
 }
@@ -96,6 +99,7 @@ pub struct AppSysConfig {
     pub run_in_docker: bool,
     pub naming_health_timeout: u64,
     pub naming_instance_timeout: u64,
+    pub naming_perpetual_instance_probe_interval: i32,
     pub ldap_enable: bool,
     pub ldap_url: Arc<String>,
     pub ldap_user_base_dn: Arc<String>,
@@ -250,6 +254,14 @@ impl AppSysConfig {
             //如果配置不合理，则默认使过期时间大于心跳时间15秒
             naming_instance_timeout = naming_health_timeout + 15 * 1000;
         }
+        let mut naming_perpetual_instance_probe_interval =
+            std::env::var("RNACOS_NAMING_PERPETUAL_INSTANCE_PROBE_INTERVAL_SECOND")
+                .unwrap_or("60".to_owned())
+                .parse()
+                .unwrap_or(60);
+        if naming_perpetual_instance_probe_interval < 5 {
+            naming_perpetual_instance_probe_interval = 5;
+        }
         let ldap_enable = std::env::var("RNACOS_LDAP_ENABLE")
             .unwrap_or("false".to_owned())
             .parse()
@@ -364,6 +376,7 @@ impl AppSysConfig {
             run_in_docker,
             naming_health_timeout,
             naming_instance_timeout,
+            naming_perpetual_instance_probe_interval,
             ldap_enable,
             ldap_url,
             ldap_user_base_dn,

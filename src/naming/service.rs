@@ -1,11 +1,5 @@
 #![allow(unused_assignments, unused_imports)]
 
-use std::{
-    collections::{HashMap, LinkedList},
-    hash::Hash,
-    sync::{atomic::Ordering, Arc},
-};
-
 use crate::common::constant::EMPTY_ARC_STRING;
 use crate::naming::cluster::model::ProcessRange;
 use crate::now_millis;
@@ -13,6 +7,12 @@ use actix_web::rt;
 use inner_mem_cache::TimeoutSet;
 use rand::prelude::IteratorRandom;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::{
+    collections::{HashMap, LinkedList},
+    hash::Hash,
+    sync::{atomic::Ordering, Arc},
+};
 
 use super::{
     api_model::QueryListResult,
@@ -51,6 +51,7 @@ pub struct Service {
     pub(crate) healthy_timeout_set: TimeoutSet<InstanceShortKey>,
     /// 不健康状态过期记录，过期后反实例删除
     pub(crate) unhealthy_timeout_set: TimeoutSet<InstanceShortKey>,
+    pub(crate) perpetual_host_set: HashSet<InstanceShortKey>,
 }
 
 impl Service {
@@ -85,7 +86,14 @@ impl Service {
         let short_key = instance.get_short_key();
         let old_instance = self.instances.get(&key);
         let mut replace_old_client_id = None;
+        let mut mark_add_perpetual_instance = !instance.ephemeral;
+        let mut mark_remove_perpetual_instance = instance.ephemeral;
         if let Some(old_instance) = old_instance {
+            if old_instance.ephemeral {
+                mark_remove_perpetual_instance = false;
+            } else {
+                mark_add_perpetual_instance = false;
+            }
             instance.register_time = old_instance.register_time;
             if !instance.from_grpc && old_instance.from_grpc {
                 /*
@@ -181,7 +189,21 @@ impl Service {
                 new_instance.get_short_key(),
             );
         }
+        if mark_add_perpetual_instance {
+            // 本次新增永久实例
+            let short_key = new_instance.get_short_key();
+            if !self.perpetual_host_set.contains(&short_key) {
+                self.perpetual_host_set.insert(short_key);
+            }
+        }
+        if mark_remove_perpetual_instance {
+            let short_key = new_instance.get_short_key();
+            if !self.perpetual_host_set.contains(&short_key) {
+                self.perpetual_host_set.insert(short_key);
+            }
+        }
         self.instances.insert(key, new_instance);
+        //TODO 应该返回持久化变化实例，以给外部处理持久化数据
         (rtype, replace_old_client_id)
     }
 
@@ -258,13 +280,20 @@ impl Service {
         );
         if let Some(client_id) = client_id {
             if let Some(old) = self.instances.get(instance_key) {
-                if !client_id.is_empty() && old.client_id.as_str() != client_id.as_str() {
-                    //不同的client_id不能删除
+                if old.ephemeral
+                    && !client_id.is_empty()
+                    && old.client_id.as_str() != client_id.as_str()
+                {
+                    //临时实例不同的client_id不能删除
                     return None;
                 }
             }
         }
         if let Some(old) = self.instances.remove(instance_key) {
+            if !old.ephemeral {
+                // 删除永久实例
+                self.perpetual_host_set.remove(instance_key);
+            }
             self.instance_size -= 1;
             if self.instance_size == 0 {
                 self.last_empty_times = now_millis();
@@ -282,11 +311,31 @@ impl Service {
         if let Some(i) = self.instances.remove(instance_id) {
             if i.healthy {
                 self.healthy_instance_size -= 1;
+            } else {
+                self.instances.insert(instance_id.clone(), i);
+                return;
             }
             let mut i = i.as_ref().clone();
             i.healthy = false;
             self.unhealthy_timeout_set
                 .add(i.last_modified_millis as u64, instance_id.clone());
+            self.instances.insert(instance_id.clone(), Arc::new(i));
+        }
+    }
+
+    pub(crate) fn update_perpetual_instance_healthy_valid(
+        &mut self,
+        instance_id: &InstanceShortKey,
+    ) {
+        if let Some(i) = self.instances.remove(instance_id) {
+            if !i.healthy && !i.ephemeral {
+                self.healthy_instance_size += 1;
+            } else {
+                self.instances.insert(instance_id.clone(), i);
+                return;
+            }
+            let mut i = i.as_ref().clone();
+            i.healthy = true;
             self.instances.insert(instance_id.clone(), Arc::new(i));
         }
     }

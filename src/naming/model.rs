@@ -315,3 +315,5 @@ pub enum DistroData {
     ServiceInstanceCount(HashMap<ServiceKey, u64>),
     DiffClientInstances(Vec<InstanceKey>),
 }
+
+pub mod actor_model;

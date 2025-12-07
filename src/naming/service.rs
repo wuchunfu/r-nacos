@@ -87,8 +87,8 @@ impl Service {
         let short_key = instance.get_short_key();
         let old_instance = self.instances.get(&key);
         let mut replace_old_client_id = None;
-        let mut mark_add_perpetual_instance = !instance.ephemeral;
-        let mut mark_remove_perpetual_instance = instance.ephemeral;
+        let mut mark_add_perpetual_instance = false;
+        let mut mark_remove_perpetual_instance = false;
         let mut perpetual_changed = false;
         if let Some(old_instance) = old_instance {
             instance.register_time = old_instance.register_time;
@@ -172,14 +172,11 @@ impl Service {
                     rtype = UpdateInstanceType::UpdateTime;
                 }
             }
-            mark_add_perpetual_instance = !instance.ephemeral;
-            mark_remove_perpetual_instance = instance.ephemeral;
-            if old_instance.ephemeral {
-                mark_remove_perpetual_instance = false;
-            } else {
-                mark_add_perpetual_instance = false;
-            }
+            mark_add_perpetual_instance = !instance.ephemeral && old_instance.ephemeral;
+            mark_remove_perpetual_instance = instance.ephemeral && !old_instance.ephemeral;
         } else {
+            mark_add_perpetual_instance = !instance.ephemeral;
+            mark_remove_perpetual_instance = false;
             //新增的尝试使用高优先级metadata
             if let Some(priority_metadata) = self.instance_metadata_map.get(&short_key) {
                 instance.metadata = priority_metadata.clone();
@@ -208,8 +205,7 @@ impl Service {
                 self.perpetual_host_set.insert(short_key);
             }
             perpetua_type = UpdatePerpetualType::New;
-        }
-        if mark_remove_perpetual_instance {
+        } else if mark_remove_perpetual_instance {
             let short_key = new_instance.get_short_key();
             self.perpetual_host_set.remove(&short_key);
             perpetua_type = UpdatePerpetualType::Remove;

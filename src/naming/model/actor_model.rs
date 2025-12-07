@@ -31,16 +31,16 @@ pub enum NamingRaftResult {
 /// 实例注册参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceRegisterParam {
-    pub ip: String,
+    pub ip: Arc<String>,
     pub port: u32,
     pub weight: f32,
     pub enabled: bool,
     pub healthy: bool,
     pub ephemeral: bool,
-    pub metadata: HashMap<String, String>,
-    pub namespace_id: String,
-    pub group_name: String,
-    pub service_name: String,
+    pub metadata: Arc<HashMap<String, String>>,
+    pub namespace_id: Arc<String>,
+    pub group_name: Arc<String>,
+    pub service_name: Arc<String>,
     pub cluster_name: Option<String>,
     pub app_name: Option<String>,
     pub last_modified_millis: i64,
@@ -48,10 +48,12 @@ pub struct InstanceRegisterParam {
 
 impl From<InstanceRegisterParam> for Instance {
     fn from(param: InstanceRegisterParam) -> Self {
-        let mut instance = Instance::new(param.ip, param.port);
-        instance.namespace_id = Arc::new(param.namespace_id);
-        instance.group_name = Arc::new(param.group_name);
-        instance.service_name = Arc::new(param.service_name);
+        let mut instance = Instance::default();
+        instance.ip = param.ip;
+        instance.port = param.port;
+        instance.namespace_id = param.namespace_id;
+        instance.group_name = param.group_name;
+        instance.service_name = param.service_name;
         instance.weight = param.weight;
         instance.enabled = param.enabled;
         instance.healthy = param.healthy;
@@ -66,6 +68,26 @@ impl From<InstanceRegisterParam> for Instance {
         instance.last_modified_millis = param.last_modified_millis;
         instance.generate_key();
         instance
+    }
+}
+
+impl From<&Instance> for InstanceRegisterParam {
+    fn from(instance: &Instance) -> Self {
+        Self {
+            ip: instance.ip.clone(),
+            port: instance.port,
+            weight: instance.weight,
+            enabled: instance.enabled,
+            healthy: instance.healthy,
+            ephemeral: instance.ephemeral,
+            metadata: instance.metadata.clone(),
+            namespace_id: instance.namespace_id.clone(),
+            group_name: instance.group_name.clone(),
+            service_name: instance.service_name.clone(),
+            cluster_name: Some(instance.cluster_name.clone()),
+            app_name: Some(instance.app_name.clone()),
+            last_modified_millis: instance.last_modified_millis,
+        }
     }
 }
 

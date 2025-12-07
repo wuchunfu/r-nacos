@@ -1,7 +1,15 @@
 #![allow(unused_assignments, unused_imports)]
 
+use super::{
+    api_model::QueryListResult,
+    model::{
+        Instance, InstanceShortKey, InstanceUpdateTag, ServiceDetailDto, ServiceKey,
+        UpdateInstanceType,
+    },
+};
 use crate::common::constant::EMPTY_ARC_STRING;
 use crate::naming::cluster::model::ProcessRange;
+use crate::naming::model::UpdatePerpetualType;
 use crate::now_millis;
 use actix_web::rt;
 use inner_mem_cache::TimeoutSet;
@@ -12,14 +20,6 @@ use std::{
     collections::{HashMap, LinkedList},
     hash::Hash,
     sync::{atomic::Ordering, Arc},
-};
-
-use super::{
-    api_model::QueryListResult,
-    model::{
-        Instance, InstanceShortKey, InstanceUpdateTag, ServiceDetailDto, ServiceKey,
-        UpdateInstanceType,
-    },
 };
 
 #[derive(Debug, Clone, Default)]
@@ -74,7 +74,7 @@ impl Service {
         mut instance: Instance,
         update_tag: Option<InstanceUpdateTag>,
         from_sync: bool,
-    ) -> (UpdateInstanceType, Option<Arc<String>>) {
+    ) -> (UpdateInstanceType, Option<Arc<String>>, UpdatePerpetualType) {
         //!("test update_instance {:?}", &instance);
         instance.namespace_id = self.namespace_id.clone();
         instance.group_name = self.group_name.clone();
@@ -83,19 +83,16 @@ impl Service {
         let key = instance.get_short_key();
         //let mut update_mark = true;
         let mut rtype = UpdateInstanceType::None;
+        let mut perpetua_type = UpdatePerpetualType::None;
         let short_key = instance.get_short_key();
         let old_instance = self.instances.get(&key);
         let mut replace_old_client_id = None;
         let mut mark_add_perpetual_instance = !instance.ephemeral;
         let mut mark_remove_perpetual_instance = instance.ephemeral;
+        let mut perpetual_changed = false;
         if let Some(old_instance) = old_instance {
-            if old_instance.ephemeral {
-                mark_remove_perpetual_instance = false;
-            } else {
-                mark_add_perpetual_instance = false;
-            }
             instance.register_time = old_instance.register_time;
-            if !instance.from_grpc && old_instance.from_grpc {
+            if instance.ephemeral && !instance.from_grpc && old_instance.from_grpc {
                 /*
                 match (old_instance.from_grpc, old_instance.is_from_cluster()) {
                     (true, true) => {
@@ -142,12 +139,16 @@ impl Service {
                 if !update_tag.is_none() {
                     if !update_tag.enabled {
                         old_instance.enabled.clone_into(&mut instance.enabled);
+                    } else if old_instance.enabled != instance.enabled {
+                        perpetual_changed = true;
                     }
                     if !update_tag.ephemeral {
                         old_instance.ephemeral.clone_into(&mut instance.ephemeral);
                     }
                     if !update_tag.weight {
                         old_instance.weight.clone_into(&mut instance.weight);
+                    } else if old_instance.weight != instance.weight {
+                        perpetual_changed = true;
                     }
                     if !update_tag.metadata {
                         instance.metadata = old_instance.metadata.clone();
@@ -155,6 +156,7 @@ impl Service {
                         //从控制台设置的metadata
                         self.instance_metadata_map
                             .insert(short_key, instance.metadata.clone());
+                        perpetual_changed = true;
                     } else if let Some(priority_metadata) =
                         self.instance_metadata_map.get(&short_key)
                     {
@@ -169,6 +171,13 @@ impl Service {
                     instance.metadata = old_instance.metadata.clone();
                     rtype = UpdateInstanceType::UpdateTime;
                 }
+            }
+            mark_add_perpetual_instance = !instance.ephemeral;
+            mark_remove_perpetual_instance = instance.ephemeral;
+            if old_instance.ephemeral {
+                mark_remove_perpetual_instance = false;
+            } else {
+                mark_add_perpetual_instance = false;
             }
         } else {
             //新增的尝试使用高优先级metadata
@@ -189,22 +198,24 @@ impl Service {
                 new_instance.get_short_key(),
             );
         }
+        if !new_instance.ephemeral && perpetual_changed {
+            perpetua_type = UpdatePerpetualType::Update;
+        }
         if mark_add_perpetual_instance {
             // 本次新增永久实例
             let short_key = new_instance.get_short_key();
             if !self.perpetual_host_set.contains(&short_key) {
                 self.perpetual_host_set.insert(short_key);
             }
+            perpetua_type = UpdatePerpetualType::New;
         }
         if mark_remove_perpetual_instance {
             let short_key = new_instance.get_short_key();
-            if !self.perpetual_host_set.contains(&short_key) {
-                self.perpetual_host_set.insert(short_key);
-            }
+            self.perpetual_host_set.remove(&short_key);
+            perpetua_type = UpdatePerpetualType::Remove;
         }
         self.instances.insert(key, new_instance);
-        //TODO 应该返回持久化变化实例，以给外部处理持久化数据
-        (rtype, replace_old_client_id)
+        (rtype, replace_old_client_id, perpetua_type)
     }
 
     ///

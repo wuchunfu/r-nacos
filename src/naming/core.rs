@@ -16,7 +16,6 @@ use super::cluster::model::{
 use super::cluster::node_manage::{InnerNodeManage, NodeManageRequest};
 use super::filter::InstanceFilterUtils;
 use super::listener::{InnerNamingListener, ListenerItem, NamingListenerCmd};
-use super::model::InstanceKey;
 use super::model::InstanceShortKey;
 use super::model::InstanceUpdateTag;
 use super::model::ServiceDetailDto;
@@ -24,6 +23,7 @@ use super::model::ServiceInfo;
 use super::model::ServiceKey;
 use super::model::UpdateInstanceType;
 use super::model::{DistroData, Instance};
+use super::model::{InstanceKey, UpdatePerpetualType};
 use super::naming_delay_nofity::DelayNotifyActor;
 use super::naming_delay_nofity::DelayNotifyCmd;
 use super::naming_subscriber::NamingListenerItem;
@@ -67,8 +67,11 @@ use crate::naming::model::actor_model::{
     SnapshotLoadRequest,
 };
 use crate::naming::sniffing::{NetSniffing, NetSniffingCmd};
+use crate::raft::cluster::route::RaftRequestRoute;
 use crate::raft::filestore::model::SnapshotRecordDto;
 use crate::raft::filestore::raftapply::{RaftApplyDataRequest, RaftApplyDataResponse};
+use crate::raft::network::core::RaftRouter;
+use crate::raft::store::{ClientRequest, ClientResponse};
 use actix::prelude::*;
 use quick_protobuf::{BytesReader, Writer};
 use regex::Regex;
@@ -97,6 +100,7 @@ pub struct NamingActor {
     pub(crate) net_sniffing_addr: Option<Addr<NetSniffing>>,
     pub(crate) last_perpetual_instance_probe_time: i32,
     //dal_addr: Addr<ServiceDalActor>,
+    pub(crate) raft_router: Option<Arc<RaftRequestRoute>>,
 }
 
 impl Actor for NamingActor {
@@ -134,10 +138,13 @@ impl Inject for NamingActor {
             self.node_id = sys_config.raft_node_id;
             log::info!("NamingActor change naming timeout info from env,health_timeout:{},instance_timeout:{}"
                 ,self.sys_config.instance_health_timeout_millis,self.sys_config.instance_timeout_millis);
-            self.sys_config.perpetual_instance_probe_interval =
-                sys_config.naming_perpetual_instance_probe_interval;
+            if sys_config.naming_perpetual_instance_probe_interval > 0 {
+                self.sys_config.perpetual_instance_probe_interval =
+                    sys_config.naming_perpetual_instance_probe_interval;
+                self.net_sniffing_addr = factory_data.get_actor();
+            }
         }
-        self.net_sniffing_addr = factory_data.get_actor();
+        self.raft_router = factory_data.get_bean();
         self.instance_time_out_heartbeat(ctx);
         log::info!("NamingActor inject complete");
     }
@@ -172,6 +179,7 @@ impl NamingActor {
             disable_notify: false,
             net_sniffing_addr: None,
             last_perpetual_instance_probe_time: 0,
+            raft_router: None,
         }
     }
 
@@ -360,13 +368,14 @@ impl NamingActor {
         key: &ServiceKey,
         instance_id: &InstanceShortKey,
         client_id: Option<&Arc<String>>,
-    ) -> UpdateInstanceType {
+    ) -> (UpdateInstanceType, UpdatePerpetualType) {
         let service = if let Some(service) = self.service_map.get_mut(key) {
             service
         } else {
-            return UpdateInstanceType::None;
+            return (UpdateInstanceType::None, UpdatePerpetualType::None);
         };
         let mut real_client_id = None;
+        let mut perpetual_tag = UpdatePerpetualType::None;
         let old_instance = service.remove_instance(instance_id, client_id);
         let now = now_millis();
         let tag = if let Some(old_instance) = &old_instance {
@@ -379,6 +388,9 @@ impl NamingActor {
                     now + self.sys_config.instance_metadata_time_out_millis,
                     instance_key,
                 );
+            }
+            if !old_instance.ephemeral {
+                perpetual_tag = UpdatePerpetualType::Remove;
             }
             UpdateInstanceType::Remove
         } else {
@@ -397,7 +409,7 @@ impl NamingActor {
                 self.remove_client_instance_key(&client_id, &instance_key);
             }
         }
-        tag
+        (tag, perpetual_tag)
     }
 
     pub fn update_instance(
@@ -406,6 +418,7 @@ impl NamingActor {
         mut instance: Instance,
         tag: Option<InstanceUpdateTag>,
         from_sync: bool,
+        self_addr: Option<Addr<Self>>,
     ) -> UpdateInstanceType {
         instance.init();
         //assert!(instance.check_valid());
@@ -441,7 +454,8 @@ impl NamingActor {
         }
         let instance_short_key = instance.get_short_key();
 
-        let (tag, replace_old_client_id) = service.update_instance(instance, tag, from_sync);
+        let (tag, replace_old_client_id, perpetua_type) =
+            service.update_instance(instance, tag, from_sync);
         #[cfg(feature = "debug")]
         log::info!(
             "update_instance tag:{:?},key:{:?},replace_old_client_id:{:?}",
@@ -449,6 +463,23 @@ impl NamingActor {
             instance_key,
             &replace_old_client_id
         );
+        if !from_sync {
+            if let Some(self_addr) = self_addr {
+                match perpetua_type {
+                    UpdatePerpetualType::New | UpdatePerpetualType::Update => {
+                        let instance = service.get_instance(&instance_short_key);
+                        if let Some(instance) = instance.clone() {
+                            self_addr.do_send(NamingCmd::NotifyUpdateRaftInstance(instance));
+                        }
+                    }
+                    UpdatePerpetualType::Remove => {
+                        self_addr
+                            .do_send(NamingCmd::NotifyRemoveRaftInstance(instance_key.clone()));
+                    }
+                    UpdatePerpetualType::None => {}
+                }
+            }
+        }
         if let UpdateInstanceType::UpdateOtherClusterMetaData(_, _) = &tag {
             return tag;
         }
@@ -1052,7 +1083,7 @@ impl NamingActor {
             self.update_service(service_detail);
         }
         for mut instance in snapshot.instances {
-            self.update_instance(&instance.get_service_key(), instance, None, true);
+            self.update_instance(&instance.get_service_key(), instance, None, true, None);
         }
     }
 
@@ -1125,7 +1156,7 @@ impl NamingActor {
                     let instance: Instance = param.into();
                     let service_key = instance.get_service_key();
                     let short_key = instance.get_short_key();
-                    self.update_instance(&service_key, instance, None, false);
+                    self.update_instance(&service_key, instance, None, true, None);
                     if let Some(instance) = self.get_instance(&service_key, &short_key) {
                         Ok(NamingRaftResult::InstanceInfo(instance))
                     } else {
@@ -1140,7 +1171,7 @@ impl NamingActor {
                 if !param.ephemeral {
                     let instance: Instance = param.into();
                     let service_key = instance.get_service_key();
-                    self.update_instance(&service_key, instance, None, false);
+                    self.update_instance(&service_key, instance, None, true, None);
                     Ok(NamingRaftResult::None)
                 } else {
                     Ok(NamingRaftResult::None)
@@ -1195,7 +1226,7 @@ impl NamingActor {
             let instance_do: InstanceDo = reader.read_message(&record.value)?;
             let instance = Instance::from_do(instance_do);
             let service_key = instance.get_service_key();
-            self.update_instance(&service_key, instance, None, true);
+            self.update_instance(&service_key, instance, None, true, None);
         }
         Ok(())
     }
@@ -1203,6 +1234,65 @@ impl NamingActor {
     /// 快照加载完成
     fn load_completed(&mut self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn update_instance_to_raft(&mut self, instance: Arc<Instance>, ctx: &mut Context<Self>) {
+        let raft_router = self.raft_router.clone();
+        let req = NamingRaftReq::UpdateInstance {
+            param: instance.as_ref().into(),
+        };
+        Self::raft_request_with_retry(req, raft_router, 2)
+            .into_actor(self)
+            .map(|res, _, _| {})
+            .spawn(ctx);
+    }
+
+    fn remove_instance_to_raft(&mut self, instance_key: InstanceKey, ctx: &mut Context<Self>) {
+        let raft_router = self.raft_router.clone();
+        let req = NamingRaftReq::RemoveInstance(instance_key);
+        Self::raft_request_with_retry(req, raft_router, 2)
+            .into_actor(self)
+            .map(|res, _, _| {})
+            .spawn(ctx);
+    }
+
+    pub(crate) async fn raft_request_with_retry(
+        req: NamingRaftReq,
+        raft_router: Option<Arc<RaftRequestRoute>>,
+        retry: i32,
+    ) -> anyhow::Result<NamingRaftResult> {
+        if raft_router.is_none() {
+            return Err(anyhow::anyhow!("raft_router is None"));
+        }
+        let mut i = 0;
+        while i < retry {
+            let res = Self::raft_request(req.clone(), raft_router.clone()).await;
+            if res.is_ok() {
+                return res;
+            }
+            i += 1;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        Self::raft_request(req, raft_router).await
+    }
+
+    pub(crate) async fn raft_request(
+        req: NamingRaftReq,
+        raft_router: Option<Arc<RaftRequestRoute>>,
+    ) -> anyhow::Result<NamingRaftResult> {
+        let raft_router = if let Some(r) = raft_router {
+            r
+        } else {
+            return Err(anyhow::anyhow!("raft_router is None"));
+        };
+        let res = raft_router
+            .request(ClientRequest::NamingReq { req })
+            .await?;
+        if let ClientResponse::NamingResp { resp } = res {
+            Ok(resp)
+        } else {
+            Err(anyhow::anyhow!("raft_request error"))
+        }
     }
 }
 
@@ -1254,6 +1344,8 @@ pub enum NamingCmd {
         service_keys: Vec<ServiceKey>,
         success: bool,
     },
+    NotifyUpdateRaftInstance(Arc<Instance>),
+    NotifyRemoveRaftInstance(InstanceKey),
 }
 
 pub enum NamingResult {
@@ -1289,7 +1381,13 @@ impl Handler<NamingCmd> for NamingActor {
         //log::info!("NamingActor handle:{:?}", &msg);
         match msg {
             NamingCmd::Update(instance, tag) => {
-                let tag = self.update_instance(&instance.get_service_key(), instance, tag, false);
+                let tag = self.update_instance(
+                    &instance.get_service_key(),
+                    instance,
+                    tag,
+                    false,
+                    Some(ctx.address()),
+                );
                 if let UpdateInstanceType::UpdateOtherClusterMetaData(node_id, instance) = tag {
                     Ok(NamingResult::RewriteToCluster(node_id, instance))
                 } else {
@@ -1297,7 +1395,8 @@ impl Handler<NamingCmd> for NamingActor {
                 }
             }
             NamingCmd::UpdateFromSync(instance, tag) => {
-                let tag = self.update_instance(&instance.get_service_key(), instance, tag, true);
+                let tag =
+                    self.update_instance(&instance.get_service_key(), instance, tag, true, None);
                 if let UpdateInstanceType::UpdateOtherClusterMetaData(node_id, instance) = tag {
                     Ok(NamingResult::RewriteToCluster(node_id, instance))
                 } else {
@@ -1306,16 +1405,20 @@ impl Handler<NamingCmd> for NamingActor {
             }
             NamingCmd::UpdateBatch(instances) => {
                 for mut instance in instances {
-                    self.update_instance(&instance.get_service_key(), instance, None, true);
+                    self.update_instance(&instance.get_service_key(), instance, None, true, None);
                 }
                 Ok(NamingResult::NULL)
             }
             NamingCmd::Delete(instance) => {
-                self.remove_instance(
+                let (_, perpetual_tag) = self.remove_instance(
                     &instance.get_service_key(),
                     &instance.get_short_key(),
                     Some(&instance.client_id),
                 );
+                if let UpdatePerpetualType::Remove = perpetual_tag {
+                    let instance_key = instance.get_instance_key();
+                    self.remove_instance_to_raft(instance_key, ctx);
+                }
                 Ok(NamingResult::NULL)
             }
             NamingCmd::DeleteBatch(instances) => {
@@ -1517,6 +1620,14 @@ impl Handler<NamingCmd> for NamingActor {
                 self.update_perpetual_health(host, service_keys, success);
                 Ok(NamingResult::NULL)
             }
+            NamingCmd::NotifyUpdateRaftInstance(instance) => {
+                self.update_instance_to_raft(instance, ctx);
+                Ok(NamingResult::NULL)
+            }
+            NamingCmd::NotifyRemoveRaftInstance(instance_key) => {
+                self.remove_instance_to_raft(instance_key, ctx);
+                Ok(NamingResult::NULL)
+            }
         }
     }
 }
@@ -1561,7 +1672,7 @@ async fn query_healthy_instances() {
     instance.cluster_name = "DEFUALT".to_owned();
     instance.init();
     let key = instance.get_service_key();
-    naming.update_instance(&key, instance, None, false);
+    naming.update_instance(&key, instance, None, false, None);
     if let Some(service) = naming.service_map.get_mut(&key) {
         service.protect_threshold = 0.1;
     }
@@ -1625,7 +1736,7 @@ fn test_remove_has_instance_service() {
     instance.cluster_name = "DEFUALT".to_owned();
     instance.init();
     let service_key = instance.get_service_key();
-    naming.update_instance(&service_key, instance.clone(), None, false);
+    naming.update_instance(&service_key, instance.clone(), None, false, None);
     let service_info = ServiceDetailDto {
         namespace_id: service_key.namespace_id.clone(),
         service_name: service_key.service_name.clone(),

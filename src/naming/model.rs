@@ -369,6 +369,14 @@ pub enum UpdateInstanceType {
 }
 
 #[derive(Debug, Clone)]
+pub enum UpdatePerpetualType {
+    None,
+    New,
+    Update,
+    Remove,
+}
+
+#[derive(Debug, Clone)]
 pub enum DistroData {
     ClientInstances(HashMap<Arc<String>, HashSet<InstanceKey>>),
     #[deprecated]

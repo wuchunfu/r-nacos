@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 
+use crate::common::pb::data_object::InstanceDo;
+use crate::naming::NamingUtils;
 use crate::now_millis_i64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +108,64 @@ impl Instance {
 
     pub fn get_id_string(&self) -> String {
         format!("{}#{}", &self.ip, &self.port)
+    }
+
+    /// 转换为 InstanceDo 用于 protobuf 序列化
+    pub fn to_do(&self) -> InstanceDo<'static> {
+        InstanceDo {
+            ip: self.ip.as_ref().clone().into(),
+            port: self.port,
+            weight: self.weight,
+            enabled: self.enabled,
+            healthy: self.healthy,
+            ephemeral: self.ephemeral,
+            metadata: self
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.clone().into(), v.clone().into()))
+                .collect(),
+            namespace_id: self.namespace_id.as_ref().clone().into(),
+            group_name: self.group_name.as_ref().clone().into(),
+            service_name: self.service_name.as_ref().clone().into(),
+            cluster_name: self.cluster_name.clone().into(),
+            app_name: self.app_name.clone().into(),
+        }
+    }
+
+    /// 从 InstanceDo 创建 Instance
+    pub fn from_do(instance_do: InstanceDo) -> Self {
+        let service_name = instance_do.service_name.clone().into_owned();
+        let group_name = instance_do.group_name.clone().into_owned();
+        Instance {
+            id: Arc::new(format!("{}#{}", instance_do.ip, instance_do.port)),
+            ip: Arc::new(instance_do.ip.into_owned()),
+            port: instance_do.port,
+            weight: instance_do.weight,
+            enabled: instance_do.enabled,
+            healthy: instance_do.healthy,
+            ephemeral: instance_do.ephemeral,
+            cluster_name: instance_do.cluster_name.into_owned(),
+            service_name: Arc::new(service_name.clone()),
+            group_name: Arc::new(group_name.clone()),
+            group_service: Arc::new(NamingUtils::get_group_and_service_name(
+                &service_name,
+                &group_name,
+            )),
+            metadata: Arc::new(
+                instance_do
+                    .metadata
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect(),
+            ),
+            last_modified_millis: now_millis_i64(),
+            register_time: now_millis_i64(),
+            namespace_id: Arc::new(instance_do.namespace_id.into_owned()),
+            app_name: instance_do.app_name.into_owned(),
+            from_grpc: false,
+            from_cluster: 0,
+            client_id: Arc::new(String::new()),
+        }
     }
 }
 

@@ -54,3 +54,19 @@ message McpServerDo {
   repeated McpServerValueDo histories = 10;
   string unique_key = 11;
 }
+
+// 实例注册参数
+message InstanceDo {
+  string ip = 1;
+  uint32 port = 2;
+  float weight = 3;
+  bool enabled = 4;
+  bool healthy = 5;
+  bool ephemeral = 6;
+  map<string, string> metadata = 7;
+  string namespace_id = 8;
+  string group_name = 9;
+  string service_name = 10;
+  optional string cluster_name = 11;
+  optional string app_name = 12;
+}

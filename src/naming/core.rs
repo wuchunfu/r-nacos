@@ -56,19 +56,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::constant::EMPTY_ARC_STRING;
+use crate::common::constant::NAMING_INSTANCE_TABLE;
 use crate::common::model::privilege::NamespacePrivilegeGroup;
+use crate::common::pb::data_object::InstanceDo;
 use crate::metrics::metrics_key::MetricsKey;
 use crate::metrics::model::{MetricsItem, MetricsQuery, MetricsRecord};
 use crate::namespace::NamespaceActor;
-use crate::naming::sniffing::{NetSniffing, NetSniffingCmd};
 use crate::naming::model::actor_model::{
-    NamingRaftReq, NamingRaftResult, InstanceRegisterParam,
-    SnapshotBuildRequest, SnapshotLoadRequest, LoadResult,
+    InstanceRegisterParam, LoadResult, NamingRaftReq, NamingRaftResult, SnapshotBuildRequest,
+    SnapshotLoadRequest,
 };
-use crate::raft::filestore::raftapply::{RaftApplyDataRequest, RaftApplyDataResponse};
+use crate::naming::sniffing::{NetSniffing, NetSniffingCmd};
 use crate::raft::filestore::model::SnapshotRecordDto;
-use crate::common::constant::RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE;
+use crate::raft::filestore::raftapply::{RaftApplyDataRequest, RaftApplyDataResponse};
 use actix::prelude::*;
+use quick_protobuf::{BytesReader, Writer};
 use regex::Regex;
 
 //#[derive(Default)]
@@ -1112,18 +1114,19 @@ impl NamingActor {
     }
 
     /// 处理命名服务Raft请求
-    pub fn process_naming_raft_request(&mut self, req: NamingRaftReq) -> anyhow::Result<NamingRaftResult> {
+    pub fn process_naming_raft_request(
+        &mut self,
+        req: NamingRaftReq,
+    ) -> anyhow::Result<NamingRaftResult> {
         match req {
             NamingRaftReq::RegisterInstance { param } => {
                 // 只有永久实例(ephemeral=false)才通过Raft处理
                 if !param.ephemeral {
-                    let instance = self.convert_param_to_instance(param.clone())?;
+                    let instance: Instance = param.into();
                     let service_key = instance.get_service_key();
+                    let short_key = instance.get_short_key();
                     self.update_instance(&service_key, instance, None, false);
-                    if let Some(instance) = self.get_instance(&service_key, &InstanceShortKey {
-                        ip: service_key.service_name.clone(),
-                        port: param.port,
-                    }) {
+                    if let Some(instance) = self.get_instance(&service_key, &short_key) {
                         Ok(NamingRaftResult::InstanceInfo(instance))
                     } else {
                         Ok(NamingRaftResult::None)
@@ -1135,7 +1138,7 @@ impl NamingActor {
             }
             NamingRaftReq::UpdateInstance { param } => {
                 if !param.ephemeral {
-                    let instance = self.convert_param_to_instance(param)?;
+                    let instance: Instance = param.into();
                     let service_key = instance.get_service_key();
                     self.update_instance(&service_key, instance, None, false);
                     Ok(NamingRaftResult::None)
@@ -1143,50 +1146,54 @@ impl NamingActor {
                     Ok(NamingRaftResult::None)
                 }
             }
-            NamingRaftReq::RemoveInstance { namespace_id, group_name, service_name, ip, port } => {
-                let service_key = ServiceKey::new(&namespace_id, &group_name, &service_name);
-                let instance_short_key = InstanceShortKey { ip: ip.into(), port };
+            NamingRaftReq::RemoveInstance(instance_key) => {
+                let service_key = instance_key.get_service_key();
+                let instance_short_key = instance_key.get_short_key();
                 self.remove_instance(&service_key, &instance_short_key, None);
                 Ok(NamingRaftResult::None)
             }
         }
     }
 
-    /// 将InstanceRegisterParam转换为Instance
-    fn convert_param_to_instance(&self, param: InstanceRegisterParam) -> anyhow::Result<Instance> {
-        let mut instance = Instance::new(param.ip, param.port);
-        instance.namespace_id = Arc::new(param.namespace_id);
-        instance.group_name = Arc::new(param.group_name);
-        instance.service_name = Arc::new(param.service_name);
-        instance.weight = param.weight;
-        instance.enabled = param.enabled;
-        instance.healthy = param.healthy;
-        instance.ephemeral = param.ephemeral;
-        instance.metadata = param.metadata.into();
-        if let Some(cluster_name) = param.cluster_name {
-            instance.cluster_name = cluster_name;
-        }
-        if let Some(app_name) = param.app_name {
-            instance.app_name = app_name;
-        }
-        instance.init();
-        Ok(instance)
-    }
-
     /// 构建快照 - 写入所有永久实例数据
-    fn build_snapshot(&self, writer: actix::Addr<crate::raft::filestore::raftsnapshot::SnapshotWriterActor>) -> anyhow::Result<()> {
-        let perpetual_instances = self.get_perpetual_instances();
-        for instance in perpetual_instances {
-            let record = self.instance_to_snapshot_record(instance)?;
-            writer.do_send(crate::raft::filestore::raftsnapshot::SnapshotWriterRequest::Record(record));
+    fn build_snapshot(
+        &self,
+        writer: Addr<crate::raft::filestore::raftsnapshot::SnapshotWriterActor>,
+    ) -> anyhow::Result<()> {
+        for service in self.service_map.values() {
+            for key in &service.perpetual_host_set {
+                if let Some(instance) = service.instances.get(key) {
+                    if !instance.ephemeral {
+                        let mut buf = Vec::new();
+                        {
+                            let mut writer = Writer::new(&mut buf);
+                            let instance_do = instance.to_do();
+                            writer.write_message(&instance_do)?;
+                        }
+                        let record = SnapshotRecordDto {
+                            tree: NAMING_INSTANCE_TABLE.clone(),
+                            key: Vec::new(),
+                            value: buf,
+                            op_type: 0,
+                        };
+                        writer.do_send(
+                            crate::raft::filestore::raftsnapshot::SnapshotWriterRequest::Record(
+                                record,
+                            ),
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     /// 加载快照记录
     fn load_snapshot_record(&mut self, record: SnapshotRecordDto) -> anyhow::Result<()> {
-        if record.tree == *RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE {
-            let instance = self.snapshot_record_to_instance(record)?;
+        if record.tree.as_str() == NAMING_INSTANCE_TABLE.as_str() {
+            let mut reader = BytesReader::from_bytes(&record.value);
+            let instance_do: InstanceDo = reader.read_message(&record.value)?;
+            let instance = Instance::from_do(instance_do);
             let service_key = instance.get_service_key();
             self.update_instance(&service_key, instance, None, true);
         }
@@ -1195,60 +1202,7 @@ impl NamingActor {
 
     /// 快照加载完成
     fn load_completed(&mut self) -> anyhow::Result<()> {
-        self.rebuild_perpetual_instance_index();
         Ok(())
-    }
-
-    /// 获取所有永久实例
-    fn get_perpetual_instances(&self) -> Vec<Arc<Instance>> {
-        let mut instances = Vec::new();
-        for service in self.service_map.values() {
-            for instance in service.instances.values() {
-                if !instance.ephemeral {
-                    instances.push(instance.clone());
-                }
-            }
-        }
-        instances
-    }
-
-    /// 应用永久实例变更
-    fn apply_perpetual_instance_change(&mut self, instance: Instance) -> anyhow::Result<()> {
-        if !instance.ephemeral {
-            let service_key = instance.get_service_key();
-            self.update_instance(&service_key, instance, None, false);
-        }
-        Ok(())
-    }
-
-    /// 重建永久实例索引
-    fn rebuild_perpetual_instance_index(&mut self) {
-        for service in self.service_map.values_mut() {
-            service.perpetual_host_set.clear();
-            for (short_key, instance) in &service.instances {
-                if !instance.ephemeral {
-                    service.perpetual_host_set.insert(short_key.clone());
-                }
-            }
-        }
-    }
-
-    /// 将Instance转换为SnapshotRecordDto
-    fn instance_to_snapshot_record(&self, instance: Arc<Instance>) -> anyhow::Result<SnapshotRecordDto> {
-        let key = format!("{}:{}:{}", instance.namespace_id, instance.group_name, instance.service_name);
-        let value = serde_json::to_vec(&*instance)?;
-        Ok(SnapshotRecordDto {
-            tree: RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE.to_string().into(),
-            key: key.into_bytes(),
-            value,
-            op_type: 1,
-        })
-    }
-
-    /// 将SnapshotRecordDto转换为Instance
-    fn snapshot_record_to_instance(&self, record: SnapshotRecordDto) -> anyhow::Result<Instance> {
-        let instance: Instance = serde_json::from_slice(&record.value)?;
-        Ok(instance)
     }
 }
 

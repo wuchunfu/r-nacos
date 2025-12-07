@@ -1,13 +1,13 @@
 use crate::common::byte_utils::bin_to_id;
 use crate::common::constant::{
     CACHE_TREE_NAME, CONFIG_TREE_NAME, MCP_SERVER_TABLE_NAME, MCP_TOOL_SPEC_TABLE_NAME,
-    NAMESPACE_TREE_NAME, RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE, SEQUENCE_TREE_NAME, SEQ_KEY_CONFIG, USER_TREE_NAME,
+    NAMESPACE_TREE_NAME, NAMING_INSTANCE_TABLE, SEQUENCE_TREE_NAME, SEQ_KEY_CONFIG, USER_TREE_NAME,
 };
 use crate::config::core::{ConfigActor, ConfigCmd, ConfigKey, ConfigValue};
 use crate::config::model::{ConfigRaftCmd, ConfigValueDO};
 use crate::mcp::core::McpManager;
-use crate::naming::core::NamingActor;
 use crate::namespace::NamespaceActor;
+use crate::naming::core::NamingActor;
 use crate::raft::db::table::{TableManager, TableManagerInnerReq, TableManagerReq};
 use crate::raft::filestore::model::SnapshotRecordDto;
 use crate::raft::filestore::raftapply::RaftApplyDataRequest;
@@ -97,7 +97,7 @@ impl RaftDataHandler {
         {
             let req = RaftApplyDataRequest::LoadSnapshotRecord(record);
             self.mcp_manager.send(req).await??;
-        } else if record.tree.as_str() == RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE.as_str() {
+        } else if record.tree.as_str() == NAMING_INSTANCE_TABLE.as_str() {
             let req = RaftApplyDataRequest::LoadSnapshotRecord(record);
             self.naming_actor.send(req).await??;
         } else {

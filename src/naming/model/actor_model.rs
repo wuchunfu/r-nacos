@@ -1,30 +1,20 @@
+use crate::naming::model::{Instance, InstanceKey};
+use crate::raft::filestore::model::SnapshotRecordDto;
+use crate::raft::filestore::raftsnapshot::SnapshotWriterActor;
+use actix::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use actix::prelude::*;
-use crate::naming::model::Instance;
-use crate::raft::filestore::raftsnapshot::SnapshotWriterActor;
-use crate::raft::filestore::model::SnapshotRecordDto;
 
 /// 命名服务Raft请求类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NamingRaftReq {
     /// 注册永久实例
-    RegisterInstance {
-        param: InstanceRegisterParam,
-    },
+    RegisterInstance { param: InstanceRegisterParam },
     /// 更新永久实例
-    UpdateInstance {
-        param: InstanceRegisterParam,
-    },
+    UpdateInstance { param: InstanceRegisterParam },
     /// 删除永久实例
-    RemoveInstance {
-        namespace_id: String,
-        group_name: String,
-        service_name: String,
-        ip: String,
-        port: u32,
-    },
+    RemoveInstance(InstanceKey),
 }
 
 impl Message for NamingRaftReq {
@@ -53,6 +43,30 @@ pub struct InstanceRegisterParam {
     pub service_name: String,
     pub cluster_name: Option<String>,
     pub app_name: Option<String>,
+    pub last_modified_millis: i64,
+}
+
+impl From<InstanceRegisterParam> for Instance {
+    fn from(param: InstanceRegisterParam) -> Self {
+        let mut instance = Instance::new(param.ip, param.port);
+        instance.namespace_id = Arc::new(param.namespace_id);
+        instance.group_name = Arc::new(param.group_name);
+        instance.service_name = Arc::new(param.service_name);
+        instance.weight = param.weight;
+        instance.enabled = param.enabled;
+        instance.healthy = param.healthy;
+        instance.ephemeral = param.ephemeral;
+        instance.metadata = param.metadata.into();
+        if let Some(cluster_name) = param.cluster_name {
+            instance.cluster_name = cluster_name;
+        }
+        if let Some(app_name) = param.app_name {
+            instance.app_name = app_name;
+        }
+        instance.last_modified_millis = param.last_modified_millis;
+        instance.generate_key();
+        instance
+    }
 }
 
 /// 快照构建请求
@@ -89,8 +103,10 @@ impl Default for InstanceRegisterParam {
             namespace_id: Default::default(),
             group_name: Default::default(),
             service_name: Default::default(),
-            cluster_name: Some("DEFAULT".to_string()),
+            //cluster_name: Some("DEFAULT".to_string()),
+            cluster_name: None,
             app_name: None,
+            last_modified_millis: 0,
         }
     }
 }

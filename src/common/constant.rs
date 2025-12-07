@@ -33,5 +33,5 @@ lazy_static::lazy_static! {
     pub static ref SEQ_MCP_SERVER_VALUE_ID: Arc<String> =  Arc::new("MCP_SERVER_VALUE_ID".to_string());
     pub static ref DEFAULT_NAMESPACE_ARC_STRING: Arc<String> = Arc::new("".to_string());
     pub static ref EMPTY_CLIENT_VERSION: Arc<ClientVersion> = Arc::new(ClientVersion::default());
-    pub static ref RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE: Arc<String> = Arc::new("T_NAMING_PERPETUAL_INSTANCE".to_string());
+    pub static ref NAMING_INSTANCE_TABLE: Arc<String> = Arc::new("T_NAMING_INSTANCE".to_string());
 }

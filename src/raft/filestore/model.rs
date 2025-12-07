@@ -150,7 +150,7 @@ impl SnapshotHeaderDto {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SnapshotRecordDto {
     pub tree: Arc<String>,
     pub key: Vec<u8>,

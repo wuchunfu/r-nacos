@@ -1,11 +1,12 @@
 use crate::common::byte_utils::bin_to_id;
 use crate::common::constant::{
     CACHE_TREE_NAME, CONFIG_TREE_NAME, MCP_SERVER_TABLE_NAME, MCP_TOOL_SPEC_TABLE_NAME,
-    NAMESPACE_TREE_NAME, SEQUENCE_TREE_NAME, SEQ_KEY_CONFIG, USER_TREE_NAME,
+    NAMESPACE_TREE_NAME, RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE, SEQUENCE_TREE_NAME, SEQ_KEY_CONFIG, USER_TREE_NAME,
 };
 use crate::config::core::{ConfigActor, ConfigCmd, ConfigKey, ConfigValue};
 use crate::config::model::{ConfigRaftCmd, ConfigValueDO};
 use crate::mcp::core::McpManager;
+use crate::naming::core::NamingActor;
 use crate::namespace::NamespaceActor;
 use crate::raft::db::table::{TableManager, TableManagerInnerReq, TableManagerReq};
 use crate::raft::filestore::model::SnapshotRecordDto;
@@ -23,6 +24,7 @@ pub struct RaftDataHandler {
     pub namespace: Addr<NamespaceActor>,
     pub sequence_db: Addr<SequenceDbManager>,
     pub mcp_manager: Addr<McpManager>,
+    pub naming_actor: Addr<NamingActor>,
 }
 
 impl RaftDataHandler {
@@ -41,6 +43,9 @@ impl RaftDataHandler {
             .send(RaftApplyDataRequest::BuildSnapshot(writer.clone()))
             .await??;
         self.mcp_manager
+            .send(RaftApplyDataRequest::BuildSnapshot(writer.clone()))
+            .await??;
+        self.naming_actor
             .send(RaftApplyDataRequest::BuildSnapshot(writer.clone()))
             .await??;
         Ok(())
@@ -92,6 +97,9 @@ impl RaftDataHandler {
         {
             let req = RaftApplyDataRequest::LoadSnapshotRecord(record);
             self.mcp_manager.send(req).await??;
+        } else if record.tree.as_str() == RNACOS_NAMING_PERPETUAL_INSTANCE_TABLE.as_str() {
+            let req = RaftApplyDataRequest::LoadSnapshotRecord(record);
+            self.naming_actor.send(req).await??;
         } else {
             log::warn!(
                 "do_load_snapshot ignore data,table name:{}",
@@ -107,6 +115,8 @@ impl RaftDataHandler {
         self.sequence_db
             .do_send(RaftApplyDataRequest::LoadCompleted);
         self.mcp_manager
+            .do_send(RaftApplyDataRequest::LoadCompleted);
+        self.naming_actor
             .do_send(RaftApplyDataRequest::LoadCompleted);
         Ok(())
     }
@@ -187,6 +197,9 @@ impl RaftDataHandler {
             }
             ClientRequest::McpReq { req } => {
                 self.mcp_manager.send(req).await.ok();
+            }
+            ClientRequest::NamingReq { req } => {
+                self.naming_actor.send(req).await.ok();
             }
         }
         Ok(())
@@ -272,6 +285,10 @@ impl RaftDataHandler {
                 let resp = self.mcp_manager.send(req).await??;
                 Ok(ClientResponse::McpResp { resp })
             }
+            ClientRequest::NamingReq { req } => {
+                let resp = self.naming_actor.send(req).await??;
+                Ok(ClientResponse::NamingResp { resp })
+            }
         }
     }
 
@@ -344,6 +361,9 @@ impl RaftDataHandler {
             }
             ClientRequest::McpReq { req } => {
                 self.mcp_manager.do_send(req);
+            }
+            ClientRequest::NamingReq { req } => {
+                self.naming_actor.do_send(req);
             }
         };
         Ok(())

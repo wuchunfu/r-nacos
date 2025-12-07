@@ -209,6 +209,7 @@ pub async fn config_factory(sys_config: Arc<AppSysConfig>) -> anyhow::Result<Fac
         table: table_manage.clone(),
         namespace: namespace_addr.clone(),
         mcp_manager: mcp_manager.clone(),
+        naming_actor: naming_addr.clone(),
     });
     factory.register(BeanDefinition::from_obj(raft_data_wrap));
     let metrics_manager = MetricsManager::new(sys_config.clone()).start();

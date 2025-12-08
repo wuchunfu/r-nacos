@@ -47,7 +47,7 @@ impl LdapMsgActor {
         match msg {
             LdapMsgReq::Bind(bind_req) => {
                 let bind_dn = format!(
-                    "cn={},{}",
+                    "uid={},{}",
                     bind_req.user_name, &ldap_config.ldap_user_base_dn
                 );
                 ldap.simple_bind(&bind_dn, &bind_req.password)
@@ -147,6 +147,9 @@ impl Handler<LdapMsgReq> for LdapMsgActor {
             } else {
                 Err(anyhow::anyhow!("ldap not init"))
             };
+            if let Err(e) = r.as_ref() {
+                log::error!("handle ldap msg error: {}", e);
+            }
             (ldap, version, tx, r)
         }
         .into_actor(self)

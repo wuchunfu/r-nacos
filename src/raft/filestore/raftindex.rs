@@ -1,9 +1,9 @@
 #![allow(clippy::suspicious_open_options)]
-use std::{collections::HashMap, path::Path, sync::Arc};
-
 use actix::prelude::*;
 use bean_factory::{bean, Inject};
 use quick_protobuf::{BytesReader, Writer};
+use std::time::Duration;
+use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::{
     fs::OpenOptions,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -386,10 +386,19 @@ impl Inject for RaftIndexManager {
         &mut self,
         factory_data: bean_factory::FactoryData,
         _factory: bean_factory::BeanFactory,
-        _ctx: &mut Self::Context,
+        ctx: &mut Self::Context,
     ) {
         self.naming_inner_node_manage = factory_data.get_actor();
         self.do_notify_membership(false);
+        ctx.run_later(Duration::from_secs(10), move |act, _ctx| {
+            act.do_notify_membership(false);
+        });
+        ctx.run_later(Duration::from_secs(30), move |act, _ctx| {
+            act.do_notify_membership(false);
+        });
+        ctx.run_later(Duration::from_secs(60), move |act, _ctx| {
+            act.do_notify_membership(false);
+        });
     }
 }
 

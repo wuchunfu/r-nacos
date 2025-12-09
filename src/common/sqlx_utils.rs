@@ -1,5 +1,4 @@
 use serde_json::Value;
-use sqlx::database::HasArguments;
 use sqlx::mysql::MySqlRow;
 use sqlx::query::Query;
 use sqlx::{Executor, MySql, MySqlConnection, Transaction};
@@ -7,7 +6,7 @@ use sqlx::{Executor, MySql, MySqlConnection, Transaction};
 pub fn build_mysql_query<'a>(
     sql: &'a str,
     args: &'a [serde_json::Value],
-) -> Query<'a, MySql, <MySql as HasArguments<'a>>::Arguments> {
+) -> Query<'a, MySql, <MySql as sqlx::Database>::Arguments<'a>> {
     let mut q = sqlx::query(sql);
     for arg in args {
         match arg {

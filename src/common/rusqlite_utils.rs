@@ -19,20 +19,14 @@ pub fn get_row_value<T>(r: &Row, name: &str) -> Option<T>
 where
     T: rusqlite::types::FromSql,
 {
-    match r.column_index(name) {
-        Ok(i) => result2option(r.get(i)),
-        _ => None,
-    }
+    result2option(r.get(name))
 }
 
 pub fn get_row_arc_value<T>(r: &Row, name: &str) -> Option<Arc<T>>
 where
     T: rusqlite::types::FromSql,
 {
-    match r.column_index(name) {
-        Ok(i) => result_to_arc_option(r.get(i)),
-        _ => None,
-    }
+    result_to_arc_option(r.get(name))
 }
 
 pub fn convert_json_param(val: &serde_json::Value) -> rusqlite::types::ToSqlOutput<'_> {

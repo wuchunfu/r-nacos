@@ -114,7 +114,7 @@ jobs:
       - name: Upload binary artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.name }}
+          name: binaries-${{ matrix.target }}${{ matrix.allocator && format('-{0}', matrix.allocator) || '' }}
           path: |
             *.tar.gz
             *.zip
@@ -138,6 +138,10 @@ jobs:
             image: "rust-musl-cross:loongarch64-musl"
             name: rnacos-loongarch64-unknown-linux-musl-${GITHUB_REF#refs/*/}.tar.gz
             allocator: ""
+          - target: "loongarch64-unknown-linux-musl"
+            image: "rust-musl-cross:loongarch64-musl"
+            name: rnacos-loongarch64-unknown-linux-musl-${GITHUB_REF#refs/*/}.tar.gz
+            allocator: "mimalloc"
     container:
       image: docker://ghcr.io/rust-cross/${{ matrix.platform.image }}
       env:
@@ -165,7 +169,7 @@ jobs:
       - name: Upload binary artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.platform.name}}
+          name: binaries-${{ matrix.platform.target}}-${{ matrix.platform.allocator && format('-{0}', matrix.platform.allocator) || '' }}
           path: |
             *.tar.gz
 

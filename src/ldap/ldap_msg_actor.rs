@@ -38,6 +38,15 @@ impl LdapMsgActor {
         self.ldap_version += 1;
     }
 
+    fn get_default_user_meta(user_name: String, ldap_config: Arc<LdapConfig>) -> LdapUserMeta {
+        LdapUserMeta::new(
+            user_name,
+            vec![],
+            ldap_config.ldap_user_default_role.clone(),
+            None,
+        )
+    }
+
     async fn handle_req(
         ldap: &mut Ldap,
         ldap_config: Arc<LdapConfig>,
@@ -56,7 +65,7 @@ impl LdapMsgActor {
                 let filter = ldap_config
                     .ldap_user_filter
                     .replace("%s", &bind_req.user_name);
-                let (mut rs, _res) = ldap
+                let (mut rs, _res) = match ldap
                     .search(
                         &ldap_config.ldap_user_base_dn,
                         ldap3::Scope::Subtree,
@@ -64,7 +73,14 @@ impl LdapMsgActor {
                         vec!["cn", "memberOf"],
                     )
                     .await?
-                    .success()?;
+                    .success()
+                {
+                    Ok(res) => res,
+                    Err(_e) => {
+                        let meta = Self::get_default_user_meta(bind_req.user_name, ldap_config);
+                        return Ok(LdapMsgResult::UserMeta(meta));
+                    }
+                };
                 if !rs.is_empty() {
                     let entry = rs.remove(0);
                     let mut entry = SearchEntry::construct(entry);
@@ -113,7 +129,8 @@ impl LdapMsgActor {
                         LdapUserMeta::new(bind_req.user_name, groups, role, namespace_privilege);
                     Ok(LdapMsgResult::UserMeta(meta))
                 } else {
-                    Err(anyhow::anyhow!("search user result is empty"))
+                    let meta = Self::get_default_user_meta(bind_req.user_name, ldap_config);
+                    Ok(LdapMsgResult::UserMeta(meta))
                 }
             }
         }

@@ -1,7 +1,7 @@
 #![allow(clippy::suspicious_open_options)]
 use crate::common::constant::{
     CACHE_TREE_NAME, CONFIG_TREE_NAME, EMPTY_STR, MCP_SERVER_TABLE_NAME, MCP_TOOL_SPEC_TABLE_NAME,
-    NAMESPACE_TREE_NAME, SEQUENCE_TREE_NAME, USER_TREE_NAME,
+    NAMESPACE_TREE_NAME, NAMING_INSTANCE_TABLE, SEQUENCE_TREE_NAME, USER_TREE_NAME,
 };
 use crate::common::tempfile::TempFile;
 use crate::raft::filestore::raftdata::RaftDataHandler;
@@ -218,6 +218,9 @@ impl TransferWriterManager {
         writer_actor.do_send(TransferWriterRequest::AddTableNameMap(
             MCP_SERVER_TABLE_NAME.clone(),
         ));
+        writer_actor.do_send(TransferWriterRequest::AddTableNameMap(
+            NAMING_INSTANCE_TABLE.clone(),
+        ));
         writer_actor.do_send(TransferWriterRequest::InitHeader);
         writer_actor
     }
@@ -256,6 +259,15 @@ impl TransferWriterManager {
                     backup_param.clone(),
                 ))
                 .await??;
+            if backup_param.naming {
+                data_wrap
+                    .naming_actor
+                    .send(TransferDataRequest::Backup(
+                        writer_actor.clone(),
+                        backup_param.clone(),
+                    ))
+                    .await??;
+            }
         } else {
             return Err(anyhow::anyhow!("data_wrap is empty"));
         }

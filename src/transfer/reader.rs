@@ -1,6 +1,6 @@
 use crate::common::constant::{
     CACHE_TREE_NAME, CONFIG_TREE_NAME, EMPTY_ARC_STRING, MCP_SERVER_TABLE_NAME,
-    MCP_TOOL_SPEC_TABLE_NAME, NAMESPACE_TREE_NAME, USER_TREE_NAME,
+    MCP_TOOL_SPEC_TABLE_NAME, NAMESPACE_TREE_NAME, NAMING_INSTANCE_TABLE, USER_TREE_NAME,
 };
 use crate::common::pb::data_object::{McpServerDo, McpToolSpecDo};
 use crate::common::pb::transfer::{TransferHeader, TransferItem};
@@ -13,6 +13,7 @@ use crate::mcp::model::tools::ToolSpec;
 use crate::namespace::model::{
     Namespace, NamespaceDO, NamespaceFromFlags, NamespaceParam, NamespaceRaftReq,
 };
+use crate::naming::model::actor_model::NamingRaftReq;
 use crate::raft::db::table::TableManagerReq;
 use crate::raft::filestore::raftdata::RaftDataHandler;
 use crate::raft::store::ClientRequest;
@@ -51,6 +52,8 @@ pub(crate) fn reader_transfer_record<'a>(
             MCP_TOOL_SPEC_TABLE_NAME.clone()
         } else if MCP_SERVER_TABLE_NAME.as_str() == record_do.table_name.as_ref() {
             MCP_SERVER_TABLE_NAME.clone()
+        } else if NAMING_INSTANCE_TABLE.as_str() == record_do.table_name.as_ref() {
+            NAMING_INSTANCE_TABLE.clone()
         } else {
             //ignore
             EMPTY_ARC_STRING.clone()
@@ -222,6 +225,10 @@ impl TransferImportManager {
                     || (param.cache && record.table_name.as_str() == CACHE_TREE_NAME.as_str())
                 {
                     Self::apply_table(raft, record).await?;
+                } else if param.naming
+                    && record.table_name.as_str() == NAMING_INSTANCE_TABLE.as_str()
+                {
+                    Self::apply_naming_instance(raft, record).await?;
                 } else {
                     ignore += 1;
                 }
@@ -318,6 +325,30 @@ impl TransferImportManager {
             req: McpManagerRaftReq::SetServer(server),
         };
         Self::send_raft_request(raft, req).await?;
+        Ok(())
+    }
+
+    async fn apply_naming_instance(
+        raft: &Arc<NacosRaft>,
+        record: TransferRecordRef<'_>,
+    ) -> anyhow::Result<()> {
+        use crate::common::pb::data_object::InstanceDo;
+        use crate::naming::model::Instance;
+        use quick_protobuf::BytesReader;
+
+        // 解析实例数据
+        let mut reader = BytesReader::from_bytes(&record.value);
+        let instance_do: InstanceDo = reader.read_message(&record.value)?;
+        let instance = Instance::from_do(instance_do);
+
+        // 通过 Raft 更新实例
+        let req = ClientRequest::NamingReq {
+            req: NamingRaftReq::UpdateInstance {
+                param: (&instance).into(),
+            },
+        };
+        Self::send_raft_request(raft, req).await?;
+
         Ok(())
     }
 

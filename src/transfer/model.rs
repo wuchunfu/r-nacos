@@ -215,6 +215,7 @@ pub struct TransferBackupParam {
     pub user: bool,
     pub cache: bool,
     pub mcp: bool,
+    pub naming: bool,
 }
 
 impl TransferBackupParam {
@@ -224,6 +225,7 @@ impl TransferBackupParam {
             user: true,
             cache: true,
             mcp: true,
+            naming: true,
         }
     }
 }
@@ -244,6 +246,7 @@ pub struct TransferImportParam {
     pub user: bool,
     pub cache: bool,
     pub mcp: bool,
+    pub naming: bool,
 }
 
 impl TransferImportParam {
@@ -253,6 +256,7 @@ impl TransferImportParam {
             user: true,
             cache: true,
             mcp: true,
+            naming: true,
         }
     }
 }

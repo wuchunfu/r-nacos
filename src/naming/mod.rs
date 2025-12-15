@@ -8,6 +8,7 @@ pub mod model;
 pub mod naming_delay_nofity;
 pub mod naming_subscriber;
 pub mod service;
+pub mod transfer;
 pub mod udp_actor;
 //pub(crate) mod dal;
 pub mod cluster;

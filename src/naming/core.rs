@@ -72,6 +72,7 @@ use crate::raft::filestore::model::SnapshotRecordDto;
 use crate::raft::filestore::raftapply::{RaftApplyDataRequest, RaftApplyDataResponse};
 use crate::raft::network::core::RaftRouter;
 use crate::raft::store::{ClientRequest, ClientResponse};
+use crate::transfer::writer::TransferWriterActor;
 use actix::prelude::*;
 use quick_protobuf::{BytesReader, Writer};
 use regex::Regex;
@@ -1293,6 +1294,38 @@ impl NamingActor {
         } else {
             Err(anyhow::anyhow!("raft_request error"))
         }
+    }
+
+    /// 迁移数据备份
+    pub(crate) fn transfer_backup(&self, writer: Addr<TransferWriterActor>) -> anyhow::Result<()> {
+        use crate::common::constant::NAMING_INSTANCE_TABLE;
+        use crate::transfer::model::{TransferRecordDto, TransferWriterRequest};
+
+        // 直接遍历 service_map 中的服务
+        for (service_key, service_info) in &self.service_map {
+            // 收集该服务的所有实例
+            for host in service_info.perpetual_host_set.iter() {
+                if let Some(instance) = service_info.instances.get(host) {
+                    if instance.ephemeral {
+                        continue;
+                    }
+                    let mut buf = Vec::new();
+                    {
+                        let mut writer = Writer::new(&mut buf);
+                        let instance_do = instance.to_do();
+                        writer.write_message(&instance_do)?;
+                    }
+                    let record = TransferRecordDto {
+                        table_name: Some(NAMING_INSTANCE_TABLE.clone()),
+                        key: Vec::new(),
+                        value: buf,
+                        table_id: 0,
+                    };
+                    writer.do_send(TransferWriterRequest::AddRecord(record));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

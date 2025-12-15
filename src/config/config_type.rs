@@ -38,9 +38,10 @@ impl ConfigType {
     /// 根据类型值获取类型
     ///
     pub fn new_by_value(v: &str) -> Self {
-        match v {
+        match v.to_lowercase().as_str() {
             "json" => Self::Json,
             "xml" => Self::Xml,
+            "yml" => Self::Yaml,
             "yaml" => Self::Yaml,
             "html" => Self::Html,
             "toml" => Self::Toml,

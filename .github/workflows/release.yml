@@ -134,6 +134,14 @@ jobs:
             image: "rust-musl-cross:aarch64-musl"
             name: rnacos-aarch64-unknown-linux-musl-mimalloc-${GITHUB_REF#refs/*/}.tar.gz
             allocator: "mimalloc"
+          - target: "loongarch64-unknown-linux-musl"
+            image: "rust-musl-cross:loongarch64-musl"
+            name: rnacos-loongarch64-unknown-linux-musl-${GITHUB_REF#refs/*/}.tar.gz
+            allocator: ""
+          - target: "loongarch64-unknown-linux-musl"
+            image: "rust-musl-cross:loongarch64-musl"
+            name: rnacos-loongarch64-unknown-linux-musl-${GITHUB_REF#refs/*/}.tar.gz
+            allocator: "mimalloc"
     container:
       image: docker://ghcr.io/rust-cross/${{ matrix.platform.image }}
       env:
@@ -161,7 +169,7 @@ jobs:
       - name: Upload binary artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.platform.allocator && format('-{0}', matrix.platform.allocator) || '' }}
+          name: binaries-${{ matrix.platform.target}}-${{ matrix.platform.allocator && format('-{0}', matrix.platform.allocator) || '' }}
           path: |
             *.tar.gz
 
